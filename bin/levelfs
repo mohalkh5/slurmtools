@@ -13,7 +13,7 @@ A value of < 1 indicates actual usage is more than expected usage.
 A value of > 1 indicates actual usage is less than expected usage
 	(shorter than average queue waits)
 Note: It is possible to have high priority in a given account
-      and low priority for your institution as a whole, and vise-versa.
+      and low priority for your institution as a whole, and vice versa.
       Both numbers affect your queue wait times. 
 
 Usage: levelfs [userid]
