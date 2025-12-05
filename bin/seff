@@ -11,12 +11,13 @@ use Sys::Hostname;
 use lib qw(/usr/lib64/perl5);
 use Slurmdb ':all';
 use Slurm ':all';
+use List::Util qw(max);
 #use Data::Dumper;
 
 my $VERSION = "2.2";
 
-# This script is roughtly equivalent to:
-# sacct -P -n -a --format JobID,User,Group,State,Cluster,AllocCPUS,REQMEM,TotalCPU,Elapsed,MaxRSS,ExitCode,NNodes,NTasks -j <job_id>
+# The script is roughly equivalent to:
+# sacct -P -n -a --format JobID,User,Group,State,Cluster,AllocCPUS,REQMEM,TresUsageInMax,TotalCPU,Elapsed,MaxRSS,ExitCode,NNodes,NTasks -j <job_id>
 
 my %opts;
 getopts('hvdf:',\%opts);
@@ -116,15 +117,29 @@ if ($array_job_id != 0) {
     }
     $array_jobid = "${array_job_id}_${array_task_id}";
 }
+
+my %gres_map = get_gres_map($db_conn, $clustername);
+
 my $tot_cpu_sec = 0;
 my $tot_cpu_usec = 0;
 my $mem = 0;
 my $maxmem = 0;
 my $avemem = 0;
+my @gpumem_values;
+my @gpuutil_values;
 for my $step (@{$job->{'steps'}}) {
     $tot_cpu_sec += $step->{'tot_cpu_sec'};
     $tot_cpu_usec += $step->{'tot_cpu_usec'};
     
+    # Grab gpumem and gputil for the the job step and store their values
+    if (exists $step->{'stats'} && exists $step->{'stats'}{'tres_usage_in_max'} && 
+        exists $gres_map{'gres/gpumem'} && exists $gres_map{'gres/gpuutil'}) {
+        my $gpumem = Slurmdb::find_tres_count_in_string($step->{'stats'}{'tres_usage_in_max'}, $gres_map{'gres/gpumem'});
+        my $gpuutil = Slurmdb::find_tres_count_in_string($step->{'stats'}{'tres_usage_in_max'}, $gres_map{'gres/gpuutil'});
+        push @gpumem_values, $gpumem;
+        push @gpuutil_values, $gpuutil;
+    }
+
     # TRES_MEM in tres_usage_in_tot is the sum of memory peaks of all tasks.
     if (exists $step->{'stats'} && exists $step->{'stats'}{'tres_usage_in_tot'}) {
         my $lmem = Slurmdb::find_tres_count_in_string($step->{'stats'}{'tres_usage_in_tot'}, TRES_MEM);
@@ -175,6 +190,8 @@ if ($state ne "PENDING") {
     } else {
         $cpu_eff = 0.0;
     }
+
+    print "──────── CPU Metrics ────────\n";
     printf("CPU Utilized: %s\n", time2str($cput));
     printf("CPU Efficiency: %.2f%% of %s core-walltime\n", $cpu_eff, time2str($corewalltime));
     printf("Job Wall-clock time: %s\n", time2str($walltime));
@@ -198,50 +215,36 @@ if ($state ne "PENDING") {
     }
 
     # --- GPU Detection and Stats ---
-    my $gpu_alloc_str = `sacct -n -p -o AllocTres -X -j $jobid_arg 2>/dev/null`;
-    chomp($gpu_alloc_str);
-    my ($gpu_type, $gpu_count) = ("", 0);
+    my $gpucount = exists $gres_map{'gres/gpu'} ? Slurmdb::find_tres_count_in_string($job->{'tres_alloc_str'}, $gres_map{'gres/gpu'}) : 0;
+    if ($gpucount > 0 && $gpucount != INFINITE64) {
 
-    if ($gpu_alloc_str =~ /gres\/gpu(?::([^=]+))?=([0-9]+)/) {
-        $gpu_type  = $1 // "unknown gpu";
-        $gpu_count = $2;
-    }
+        # Get maximum values over the job steps
+        my $max_gpumem = @gpumem_values ? max(@gpumem_values) : 'N/A';
+        my $max_gpuutil = @gpuutil_values ? max(@gpuutil_values) : 'N/A';
 
-    if ($gpu_count > 0) {
+        # Account for cases where this is an incompatible GPU type e.g. one of the values is equal to 4294967295
+        if (($max_gpumem ne 'N/A' && $max_gpumem == INFINITE64) || 
+            ($max_gpuutil ne 'N/A' && $max_gpuutil == INFINITE64)) {
+            $max_gpumem = 'N/A';
+            $max_gpuutil = 'N/A';
+        }
+
+        # convert to kibibytes so it can be used in kbytes2str
+        if ($max_gpumem ne 'N/A'){
+            $max_gpumem = $max_gpumem / 1024;
+            $max_gpumem = kbytes2str($max_gpumem)
+        }
+
         print "\n──────── GPU Metrics ────────\n";
-        print "Number of GPUs: ${gpu_type} x${gpu_count}\n";
+        print "Number of GPUs: ${gpucount}\n";
+        # TODO: If we want, we could get the GPU type using one of the other gres/gpu options that are present in the code
+        # e.g. print $job->{'tres_alloc_str'} . "\n";
 
-        print "NOTE: GPU metric availability and accuracy may vary by GPU type and system configuration.\n";
+        print "NOTE: GPU metric availability may vary by GPU type.\n";
         print "      Please refer to our documentation for details.\n";
-
-        my $gpu_usage_str = `sacct -n -p -o TresUsageInMax --noconvert -j $jobid_arg 2>/dev/null`;
-        my ($max_gpu_util, $max_gpu_mem) = (undef, undef);
-
-        for my $line (split /\n/, $gpu_usage_str) {
-            my $gpu_util = ($line =~ /gres\/gpuutil=([0-9]+)/) ? $1 : undef;
-            my $gpu_mem  = ($line =~ /gres\/gpumem=([0-9]+)/) ? $1 : undef;
-
-            if (defined $gpu_util) {
-                $max_gpu_util = (!defined($max_gpu_util) or $gpu_util > $max_gpu_util)
-                                ? $gpu_util : $max_gpu_util;
-            }
-            if (defined $max_gpu_mem && defined $gpu_mem) {
-                $max_gpu_mem = ($gpu_mem > $max_gpu_mem) ? $gpu_mem : $max_gpu_mem;
-            } elsif (defined $gpu_mem) {
-                $max_gpu_mem = $gpu_mem;
-            }
-        }
-        print "Max GPU Utilization: " .
-              (defined($max_gpu_util) ? "$max_gpu_util%\n" : "N/A\n");
-
-        if (defined $max_gpu_mem) {
-            my $max_gpu_mem_gb = sprintf("%.2f", $max_gpu_mem / 1e9);
-            print "Max GPU Memory Utilized: ${max_gpu_mem_gb} GB\n";
-        } else {
-            print "Max GPU Memory Utilized: N/A\n";
-        }
+        print "Max GPU Utilization: " . ($max_gpuutil ne 'N/A' ? "${max_gpuutil}%" : $max_gpuutil) . "\n";
+        print "Max GPU Memory Utilized: ${max_gpumem}\n";
     }
-
 } else {
     print "Efficiency not available for jobs in the PENDING state.\n";
 }
@@ -279,4 +282,33 @@ sub convert_to_seconds {
         ($minutes,$seconds) = ($1,$2);
     }
     return $days*86400 + $hours*3600 + $minutes*60 + $seconds;
+}
+
+sub get_gres_map {
+    my ($db_conn, $clustername) = @_;
+    
+    my %hv = ();
+    my $clusters = Slurmdb::clusters_get($db_conn, \%hv);
+    my ($target_cluster) = grep { $_->{'name'} eq $clustername } @$clusters;
+    
+    return () unless $target_cluster;  # Return empty hash if cluster not found
+    
+    my %tres_map;
+    for my $tres_usage (@{$target_cluster->{'accounting_list'}}) {
+        if (exists $tres_usage->{'tres_rec'}) {
+            my $tres = $tres_usage->{'tres_rec'};
+
+            next unless exists $tres->{'name'};
+            my $id = $tres->{'id'};
+
+            next unless exists $tres->{'name'};
+            my $name = $tres->{'type'} . '/' . $tres->{'name'};
+            
+            if ($name =~ /^gres\//) {
+                $tres_map{$name} = $id;
+            }
+        }
+    }
+    
+    return %tres_map;
 }
