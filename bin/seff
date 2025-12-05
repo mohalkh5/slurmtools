@@ -191,7 +191,7 @@ if ($state ne "PENDING") {
         $cpu_eff = 0.0;
     }
 
-    print "──────── CPU Metrics ────────\n";
+    print "\n──────── CPU Metrics ────────\n";
     printf("CPU Utilized: %s\n", time2str($cput));
     printf("CPU Efficiency: %.2f%% of %s core-walltime\n", $cpu_eff, time2str($corewalltime));
     printf("Job Wall-clock time: %s\n", time2str($walltime));
