@@ -313,3 +313,32 @@ sub get_gres_map {
     
     return %tres_map;
 }
+
+sub get_gpu_type {
+    my ($tres_alloc_str, %gres_map) = @_;
+
+    return "Unknown" unless $tres_alloc_str;
+
+    # Reverse mapping: id -> name
+    my %id_to_name = reverse %gres_map;
+
+    for my $entry (split ',', $tres_alloc_str) {
+
+        my ($key, $count) = split '=', $entry, 2;
+        next unless defined $count && $count > 0;
+
+        if (exists $id_to_name{$key}) {
+            my $name = $id_to_name{$key};
+
+            my ($type, $gpu_name) = split ':', $name, 2;
+            return $gpu_name if defined $gpu_name;
+        }
+
+        my ($gres, $gpu_name) = split ':', $key, 2;
+        if (defined $gpu_name && $gres eq 'gres/gpu') {
+            return $gpu_name;
+        }
+    }
+
+    return "Unknown";
+}
