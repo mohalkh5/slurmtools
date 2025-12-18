@@ -239,7 +239,8 @@ if ($state ne "PENDING") {
         print "Number of GPUs: ${gpucount}\n";
         # TODO: If we want, we could get the GPU type using one of the other gres/gpu options that are present in the code
         # e.g. print $job->{'tres_alloc_str'} . "\n";
-
+my $gpu_type = get_gpu_type($job->{'tres_alloc_str'}, %gres_map);
+print "GPU Type: $gpu_type\n";
         print "NOTE: GPU metric availability may vary by GPU type.\n";
         print "      Please refer to our documentation for details.\n";
         print "Max GPU Utilization: " . ($max_gpuutil ne 'N/A' ? "${max_gpuutil}%" : $max_gpuutil) . "\n";
